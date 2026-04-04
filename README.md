@@ -37,6 +37,7 @@ git push -u origin main
 4. Go to Site settings > Environment variables and add:
    - `VITE_SUPABASE_URL` = your Supabase project URL
    - `VITE_SUPABASE_ANON_KEY` = your Supabase anon key
+   - `ANTHROPIC_API_KEY` = your Anthropic API key (starts with `sk-ant-`)
 5. Trigger a redeploy after adding env vars
 
 That's it. The site is live.

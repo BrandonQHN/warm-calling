@@ -14,6 +14,11 @@ function normalize(addr) {
   return (addr || '').toString().trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
+function stripUnit(addr) {
+  // Strip unit/apt/suite suffixes for fallback matching
+  return normalize(addr).replace(/\s*#\s*\S+$/, '').replace(/\s*(unit|apt|ste|suite)\s*\S+$/i, '').trim()
+}
+
 // Read an uploaded file (xlsx or csv) into an array of row objects
 export function readFile(file) {
   return new Promise((resolve, reject) => {
@@ -68,8 +73,9 @@ function buildContactMap(contactRows) {
       const pt = clean(row[`Phone ${i} Type`])
       const pd = clean(row[`Phone ${i} DNC`])
       if (ph != null && ph !== '') {
-        const num = String(Math.floor(Number(ph)))
-        if (num && num !== 'NaN' && !c.phones.find(p => p.num === num)) {
+        // Strip non-digits, handle floats from Excel (3132584489.0)
+        const num = String(ph).replace(/[^0-9]/g, '').replace(/^0+/, '')
+        if (num && num.length >= 7 && !c.phones.find(p => p.num === num)) {
           c.phones.push({ num, type: pt || '', dnc: !!pd })
         }
       }
@@ -99,9 +105,19 @@ function buildContactMap(contactRows) {
 export function processFiles(propRows, contactRows) {
   const contactMap = buildContactMap(contactRows)
 
+  // Build a fallback map keyed by stripped addresses for fuzzy matching
+  const fallbackMap = {}
+  for (const [addr, contact] of Object.entries(contactMap)) {
+    const stripped = stripUnit(addr)
+    if (!fallbackMap[stripped]) fallbackMap[stripped] = contact
+  }
+
   const leads = propRows.map((row, idx) => {
     const addr = normalize(row['Address'] || '')
-    const contact = contactMap[addr] || { phones: [], emails: [], names: [] }
+    // Try exact match first, then fallback to stripped address
+    const contact = contactMap[addr]
+      || fallbackMap[stripUnit(addr)]
+      || { phones: [], emails: [], names: [] }
 
     const mlsDateRaw = clean(row['MLS Date'])
     const mlsDate = mlsDateRaw ? mlsDateRaw.substring(0, 10) : null

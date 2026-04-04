@@ -78,7 +78,10 @@ export function buildIntel(lead) {
   if (lead.mlsAmount) {
     parts.push(lead.mlsAmount > 1000 ? `Listed $${lead.mlsAmount.toLocaleString()}` : `$${lead.mlsAmount.toLocaleString()}/mo`)
   }
-  if (lead.equity != null) parts.push(`~$${lead.equity.toLocaleString()} equity`)
+  if (lead.equity != null) {
+    if (lead.equity < 0) parts.push('Underwater')
+    else parts.push(`~$${lead.equity.toLocaleString()} equity`)
+  }
   parts.push(lead.ownerOcc === 'Yes' ? 'Owner-occ' : 'Absentee')
 
   const pt = lead.propType || ''

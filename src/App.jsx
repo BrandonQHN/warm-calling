@@ -3,7 +3,7 @@ import {
   Phone, Mail, TrendingUp, Download, ChevronDown, ChevronRight,
   Star, Zap, BarChart3, Users, Target, Search, X, Copy, Check,
   Loader2, FileSpreadsheet, ArrowUpDown, Sparkles, PhoneCall,
-  AlertCircle, MessageSquare,
+  AlertCircle,
 } from 'lucide-react'
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { readFile, processFiles } from './lib/parser'
@@ -152,12 +152,20 @@ export default function App() {
   // Batch email campaign
   const runBatchEmails = async () => {
     if (!leads) return
-    setBatchRunning(true); setBatchDone(0); setBatchTotal(leads.filter(l => l.hasEmail).length)
+    const emailCount = leads.filter(l => l.hasEmail).length
+    if (emailCount === 0) return
+    setBatchRunning(true); setBatchDone(0); setBatchTotal(emailCount)
     setBatchResults(null); cancelRef.current = false
-    const results = await batchGenerateEmails(leads, (done, total) => {
-      setBatchDone(done); setBatchTotal(total)
-    }, cancelRef)
-    setBatchResults(results); setBatchRunning(false)
+    try {
+      const results = await batchGenerateEmails(leads, (done, total) => {
+        setBatchDone(done); setBatchTotal(total)
+      }, cancelRef)
+      setBatchResults(results)
+    } catch (e) {
+      console.error('Batch generation error:', e)
+      setBatchResults([])
+    }
+    setBatchRunning(false)
   }
 
   const pct = batchTotal > 0 ? Math.round(batchDone / batchTotal * 100) : 0
@@ -383,7 +391,7 @@ export default function App() {
                       </span>
                       <span className="td-contact">{l.contactNames || ''}</span>
                       <span className="td-equity" style={{ color: l.equity > 0 ? '#16a34a' : '#dc3545' }}>
-                        {l.equity != null ? `$${Math.round(l.equity / 1000)}K` : ''}
+                        {l.equity != null ? (l.equity < 0 ? `-$${Math.round(Math.abs(l.equity) / 1000)}K` : `$${Math.round(l.equity / 1000)}K`) : ''}
                       </span>
                       <span className="td-mls">{l.mlsAmount ? (l.mlsAmount > 1000 ? `$${Math.round(l.mlsAmount / 1000)}K` : `$${l.mlsAmount}`) : ''}</span>
                       <span className="td-reach">
@@ -448,7 +456,7 @@ function LeadDetail({ lead: l, ai, aiLoading, onGenerate }) {
       <div style={{ borderTop: '1px solid #e8e9ec', paddingTop: 16 }}>
         <div className="detail-section__title">AI Outreach</div>
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-          {[['email', 'Generate Email', Mail], ['text', 'Generate Text', MessageSquare], ['script', 'Generate Opener Script', Phone]].map(([type, label, Icon]) => {
+          {[['email', 'Generate Email', Mail], ['script', 'Generate Opener Script', Phone]].map(([type, label, Icon]) => {
             const k = `${l.id}-${type}`
             if (ai[k]) return null
             return (
@@ -460,11 +468,11 @@ function LeadDetail({ lead: l, ai, aiLoading, onGenerate }) {
             )
           })}
         </div>
-        {['email', 'text', 'script'].map(type => {
+        {['email', 'script'].map(type => {
           const k = `${l.id}-${type}`
           if (!ai[k]) return null
-          const labels = { email: 'Personalized Email', text: 'Follow-Up Text', script: 'Opener Script' }
-          const icons = { email: Mail, text: MessageSquare, script: Phone }
+          const labels = { email: 'Personalized Email', script: 'Opener Script' }
+          const icons = { email: Mail, script: Phone }
           const I = icons[type]
           return (
             <div key={type} style={{ background: '#fff', border: '1px solid #e8e9ec', borderRadius: 10, padding: 16, marginBottom: 10, boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
