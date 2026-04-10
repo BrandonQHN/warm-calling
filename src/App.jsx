@@ -204,7 +204,7 @@ export default function App() {
 
   const genAI=async(id,type)=>{
     const k=`${id}-${type}`;if(ai[k])return;setAiL(p=>({...p,[k]:true}))
-    try{setAi(p=>({...p,[k]:await generateForLead(leads.find(l=>l.id===id),type)}))}
+    try{const result=await generateForLead(leads.find(l=>l.id===id),type);setAi(p=>({...p,[k]:result}))}
     catch(e){setAi(p=>({...p,[k]:'Could not generate. '+e.message}))}
     setAiL(p=>({...p,[k]:false}))
   }
