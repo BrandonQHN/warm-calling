@@ -30,12 +30,13 @@ export function scoreLead(lead) {
   if (lead.hasEmail) score += 10
   const dse = lead.daysSinceExpired
   if (dse != null) {
-    if (dse <= 1) { score += 15; notes.push('Expired today') }
-    else if (dse <= 3) { score += 12; notes.push('Expired this week') }
-    else if (dse <= 7) score += 10
-    else if (dse <= 14) score += 7
-    else if (dse <= 30) score += 4
-    else score += 1
+    if (dse === 0)       { score += 15; notes.push('Expired today') }
+    else if (dse === 1)  { score += 14; notes.push('Expired yesterday') }
+    else if (dse <= 3)   { score += 12; notes.push(`Expired ${dse} days ago`) }
+    else if (dse <= 7)   { score += 10; notes.push(`Expired ${dse} days ago`) }
+    else if (dse <= 14)  { score += 7 }
+    else if (dse <= 30)  { score += 4 }
+    else                 { score += 1 }
   }
   const p = lead.listPrice
   if (p != null && p > 0) {
