@@ -2,14 +2,14 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   Phone, Mail, TrendingUp, Download, ChevronDown, ChevronRight, Clock,
   Zap, BarChart3, Users, Target, Search, X, Copy, Check, Loader2,
-  FileSpreadsheet, ArrowUpDown, Sparkles, PhoneCall, AlertCircle,
+  FileSpreadsheet, ArrowUpDown, PhoneCall, AlertCircle,
   LogOut, Trash2, FolderOpen, Plus, ArrowLeft,
 } from 'lucide-react'
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { readFile, processLeads } from './lib/parser'
 import { TIERS } from './lib/scoring'
-import { exportRankedXLSX, exportMojoCSV, exportEmailCSV, computeStats } from './lib/exporter'
-import { generateForLead, batchGenerateEmails } from './lib/ai'
+import { exportRankedXLSX, exportMojoCSV, computeStats } from './lib/exporter'
+import { generateForLead } from './lib/ai'
 import {
   supabase, signIn, signOut, getSession, onAuthChange,
   createList, insertLeads, loadLists, loadLeads, deleteList,
@@ -122,11 +122,6 @@ export default function App() {
   const [sortDir,setSortDir]=useState('desc')
   const [ai,setAi]=useState({})
   const [aiL,setAiL]=useState({})
-  const [batchOn,setBatchOn]=useState(false)
-  const [batchDone,setBatchDone]=useState(0)
-  const [batchTotal,setBatchTotal]=useState(0)
-  const [batchRes,setBatchRes]=useState(null)
-  const cancelRef=useRef(false)
 
   // Auth check
   useEffect(()=>{
@@ -209,14 +204,6 @@ export default function App() {
     setAiL(p=>({...p,[k]:false}))
   }
 
-  const runBatch=async()=>{
-    if(!leads)return;const n=leads.filter(l=>l.hasEmail).length;if(!n)return
-    setBatchOn(true);setBatchDone(0);setBatchTotal(n);setBatchRes(null);cancelRef.current=false
-    try{setBatchRes(await batchGenerateEmails(leads,(d,t)=>{setBatchDone(d);setBatchTotal(t)},cancelRef))}catch{setBatchRes([])}
-    setBatchOn(false)
-  }
-
-  const pct=batchTotal>0?Math.round(batchDone/batchTotal*100):0
   const email=session?.user?.email
 
   // States
@@ -260,33 +247,6 @@ export default function App() {
 
   return (
     <div>
-      {/* Batch modal */}
-      {(batchOn||batchRes)&&(
-        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.3)',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center'}} onClick={()=>{if(!batchOn)setBatchRes(null)}}>
-          <div onClick={e=>e.stopPropagation()} style={{background:'#fff',borderRadius:16,padding:28,width:440,maxWidth:'92vw',boxShadow:'0 16px 48px rgba(0,0,0,0.1)'}}>
-            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:16}}>
-              <div style={{width:36,height:36,borderRadius:10,background:batchRes?'#ecfdf5':'#eff6ff',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                {batchOn?<Loader2 size={18} color="#2563eb" className="spinning"/>:<Check size={18} color="#16a34a"/>}</div>
-              <div><div style={{fontSize:15,fontWeight:700}}>{batchOn?'Writing emails...':'Emails ready'}</div>
-                <div style={{fontSize:13,color:'#9ca3af'}}>{batchOn?`${batchDone} of ${batchTotal}`:`${batchRes?.length} personalized emails`}</div></div>
-            </div>
-            <div style={{background:'#f0f1f3',borderRadius:5,height:5,marginBottom:16,overflow:'hidden'}}>
-              <div style={{background:batchRes?'#16a34a':'#2563eb',height:'100%',borderRadius:5,width:`${pct}%`,transition:'width 0.3s'}}/></div>
-            {batchOn&&<div style={{display:'flex',justifyContent:'space-between'}}><span style={{fontSize:13,color:'#9ca3af'}}>{pct}%</span><button onClick={()=>{cancelRef.current=true}} style={{background:'none',border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 12px',fontSize:12,color:'#dc2626',cursor:'pointer'}}>Cancel</button></div>}
-            {batchRes&&<>
-              {batchRes.length>0&&<><div style={{fontSize:11,color:'#9ca3af',textTransform:'uppercase',fontWeight:600,marginBottom:6}}>Preview</div>
-              <div style={{maxHeight:160,overflowY:'auto',marginBottom:12}}>{batchRes.slice(0,3).map((r,i)=><div key={i} style={{background:'#f8f9fa',borderRadius:8,padding:10,marginBottom:6,border:'1px solid #f0f0f2'}}><div style={{fontSize:12,fontWeight:600,marginBottom:2}}>{r.first_name} {r.last_name} &middot; {r.email}</div><div style={{fontSize:12,color:'#4b5563',lineHeight:1.5,maxHeight:44,overflow:'hidden'}}>{r.custom_email_body}</div></div>)}</div></>}
-              {batchRes.length===0&&<p style={{fontSize:13,color:'#9ca3af',marginBottom:12}}>No emails were generated. Check your API key configuration.</p>}
-              <p style={{fontSize:13,color:'#4b5563',marginBottom:12}}>Export as CSV and upload into Instantly or your outreach tool. Each row has the email address and a custom email body written for that property.</p>
-              <div style={{display:'flex',gap:8}}>
-                {batchRes.length>0&&<button onClick={()=>exportEmailCSV(batchRes)} style={{flex:1,background:'#111827',border:'none',borderRadius:10,padding:'9px',color:'#fff',fontSize:13,fontWeight:600,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6}}><Download size={14}/>Export CSV</button>}
-                <button onClick={()=>setBatchRes(null)} style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'9px 14px',fontSize:13,color:'#9ca3af',cursor:'pointer'}}>{batchRes.length>0?'Close':'Dismiss'}</button>
-              </div>
-            </>}
-          </div>
-        </div>
-      )}
-
       {/* Nav */}
       <nav className="topnav">
         <div className="topnav__left">
@@ -299,7 +259,6 @@ export default function App() {
           {saving&&<div className="save-indicator"><Loader2 size={12} className="spinning"/>Saving...</div>}
         </div>
         <div className="topnav__right">
-          <button onClick={runBatch} disabled={batchOn||!leads?.some(l=>l.hasEmail)} style={{background:'#111827',border:'none',borderRadius:10,padding:'6px 14px',color:'#fff',display:'flex',alignItems:'center',gap:5,fontSize:13,fontWeight:600,cursor:(batchOn||!leads?.some(l=>l.hasEmail))?'default':'pointer',opacity:(batchOn||!leads?.some(l=>l.hasEmail))?0.4:1}}><Sparkles size={14}/>Email Campaign</button>
           <button onClick={()=>exportMojoCSV(leads)} className="export-btn export-btn--mojo"><PhoneCall size={13}/>Mojo CSV</button>
           <button onClick={()=>exportRankedXLSX(leads)} className="export-btn"><Download size={13}/>Export XLSX</button>
         </div>
