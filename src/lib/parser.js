@@ -2,166 +2,72 @@ import * as XLSX from 'xlsx'
 import Papa from 'papaparse'
 import { scoreLead, buildIntel } from './scoring'
 
-function parseVal(v) {
-  return v != null && v !== '' && !isNaN(v) ? Number(v) : null
+function num(v) { return v != null && v !== '' && !isNaN(v) ? Number(v) : null }
+function str(v) { return v != null && v !== '' ? String(v).trim() : null }
+function phone(v) {
+  if (v == null || v === '') return null
+  const n = String(v).replace(/[^0-9]/g, '')
+  return n.length >= 7 ? n : null
 }
+function daysAgo(d) { try { const t = new Date(d); return isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 864e5)) } catch { return null } }
+function fmtDate(d) { try { const t = new Date(d); return isNaN(t) ? null : t.toISOString().slice(0, 10) } catch { return null } }
 
-function clean(v) {
-  return v != null && v !== '' ? String(v).trim() : null
-}
-
-function normalize(addr) {
-  return (addr || '').toString().trim().toLowerCase().replace(/\s+/g, ' ')
-}
-
-function stripUnit(addr) {
-  // Strip unit/apt/suite suffixes for fallback matching
-  return normalize(addr).replace(/\s*#\s*\S+$/, '').replace(/\s*(unit|apt|ste|suite)\s*\S+$/i, '').trim()
-}
-
-// Read an uploaded file (xlsx or csv) into an array of row objects
 export function readFile(file) {
   return new Promise((resolve, reject) => {
     const ext = file.name.split('.').pop().toLowerCase()
-
     if (ext === 'csv' || ext === 'tsv') {
-      Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
-        complete: (results) => resolve(results.data),
-        error: (err) => reject(err),
-      })
+      Papa.parse(file, { header: true, skipEmptyLines: true, complete: r => resolve(r.data), error: reject })
     } else {
       const reader = new FileReader()
-      reader.onload = (e) => {
+      reader.onload = e => {
         try {
-          const data = new Uint8Array(e.target.result)
-          const wb = XLSX.read(data, { type: 'array' })
-          const ws = wb.Sheets[wb.SheetNames[0]]
-          const rows = XLSX.utils.sheet_to_json(ws, { defval: '' })
-          resolve(rows)
-        } catch (err) {
-          reject(err)
-        }
+          const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' })
+          if (!wb.SheetNames.length) return reject(new Error('The file has no sheets.'))
+          resolve(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' }))
+        } catch (err) { reject(new Error('Could not read this file. Make sure it is a valid .xlsx or .csv export from Mojo.')) }
       }
-      reader.onerror = reject
+      reader.onerror = () => reject(new Error('Failed to read the file. Please try again.'))
       reader.readAsArrayBuffer(file)
     }
   })
 }
 
-// Build contact lookup map from skip-traced contacts CSV
-function buildContactMap(contactRows) {
-  const map = {}
-
-  contactRows.forEach((row) => {
-    const addr = normalize(row['Street Address'] || '')
-    if (!addr) return
-    if (!map[addr]) map[addr] = { phones: [], emails: [], names: [] }
-    const c = map[addr]
-
-    // Names
-    const fn = clean(row['First Name'])
-    const ln = clean(row['Last Name'])
-    const co = clean(row['Company Name'])
-    if (fn || ln) c.names.push([fn, ln].filter(Boolean).join(' '))
-    else if (co) c.names.push(co)
-
-    // Phones (deduped)
-    for (let i = 1; i <= 5; i++) {
-      const ph = row[`Phone ${i}`]
-      const pt = clean(row[`Phone ${i} Type`])
-      const pd = clean(row[`Phone ${i} DNC`])
-      if (ph != null && ph !== '') {
-        // Strip non-digits, handle floats from Excel (3132584489.0)
-        const num = String(ph).replace(/[^0-9]/g, '').replace(/^0+/, '')
-        if (num && num.length >= 7 && !c.phones.find(p => p.num === num)) {
-          c.phones.push({ num, type: pt || '', dnc: !!pd })
-        }
-      }
-    }
-
-    // Emails (deduped)
-    for (let i = 1; i <= 4; i++) {
-      const em = clean(row[`Email ${i}`])
-      if (em && !c.emails.includes(em)) c.emails.push(em)
-    }
-  })
-
-  // Sort phones: non-DNC cells first, then non-DNC landlines, then DNC
-  Object.values(map).forEach((c) => {
-    c.phones.sort((a, b) => {
-      const dncDiff = (a.dnc ? 1 : 0) - (b.dnc ? 1 : 0)
-      if (dncDiff !== 0) return dncDiff
-      return (a.type === 'Cell' ? 0 : 1) - (b.type === 'Cell' ? 0 : 1)
-    })
-    c.names = [...new Set(c.names)]
-  })
-
-  return map
+// Validate that the file has the expected Mojo columns
+function validateColumns(rows) {
+  if (!rows.length) throw new Error('The file is empty. Export your leads from Mojo and try again.')
+  const cols = Object.keys(rows[0])
+  const required = ['Property Address']
+  const missing = required.filter(c => !cols.includes(c))
+  if (missing.length) {
+    throw new Error(`This file is missing the "Property Address" column. Make sure you are uploading a Mojo lead export (.xlsx or .csv).`)
+  }
 }
 
-// Merge property rows with contact map, score, and return sorted leads
-export function processFiles(propRows, contactRows) {
-  const contactMap = buildContactMap(contactRows)
-
-  // Build a fallback map keyed by stripped addresses for fuzzy matching
-  const fallbackMap = {}
-  for (const [addr, contact] of Object.entries(contactMap)) {
-    const stripped = stripUnit(addr)
-    if (!fallbackMap[stripped]) fallbackMap[stripped] = contact
-  }
-
-  const leads = propRows.map((row, idx) => {
-    const addr = normalize(row['Address'] || '')
-    // Try exact match first, then fallback to stripped address
-    const contact = contactMap[addr]
-      || fallbackMap[stripUnit(addr)]
-      || { phones: [], emails: [], names: [] }
-
-    const mlsDateRaw = clean(row['MLS Date'])
-    const mlsDate = mlsDateRaw ? mlsDateRaw.substring(0, 10) : null
-
-    const lead = {
-      id: idx,
-      address: clean(row['Address']) || '',
-      unit: clean(row['Unit #']),
-      city: clean(row['City']) || '',
-      state: clean(row['State']) || 'FL',
-      zip: clean(row['Zip']) || '',
-      ownerOcc: clean(row['Owner Occupied']),
-      ownerFirst: clean(row['Owner 1 First Name']),
-      ownerLast: clean(row['Owner 1 Last Name']),
-      propType: clean(row['Property Type']) || '',
-      beds: parseVal(row['Bedrooms']),
-      baths: parseVal(row['Total Bathrooms']),
-      sqft: parseVal(row['Building Sqft']),
-      lotSqft: parseVal(row['Lot Size Sqft']),
-      yearBuilt: parseVal(row['Effective Year Built']),
-      mlsAmount: parseVal(row['MLS Amount']),
-      estValue: parseVal(row['Est. Value']),
-      equity: parseVal(row['Est. Equity']),
-      ltv: parseVal(row['Est. Loan-to-Value']),
-      assessedValue: parseVal(row['Total Assessed Value']),
-      lastSaleAmount: parseVal(row['Last Sale Amount']),
-      lastSaleDate: clean(row['Last Sale Recording Date']),
-      openLoans: parseVal(row['Total Open Loans']),
-      remainingBalance: parseVal(row['Est. Remaining balance of Open Loans']),
-      mlsDate,
-      mlsStatus: clean(row['MLS Status']),
-      contactNames: contact.names.slice(0, 3).join(' | '),
-      phones: contact.phones.slice(0, 5),
-      emails: contact.emails.slice(0, 3),
-      callablePhones: contact.phones.filter(p => !p.dnc).length,
-      totalPhones: contact.phones.length,
-      hasEmail: contact.emails.length > 0,
+export function processLeads(rows) {
+  validateColumns(rows)
+  return rows.map((row, idx) => {
+    const phones = [], seen = new Set()
+    const add = (v, type) => { const n = phone(v); if (n && !seen.has(n)) { seen.add(n); phones.push({ num: n, type }) } }
+    add(row['Primary Phone'], str(row['Primary Phone Label']) || 'Primary')
+    for (let i = 1; i <= 10; i++) {
+      add(row[`Phone ${i}`], str(row[`Phone ${i} Label`]) || 'Phone')
+      add(row[`Mobile ${i}`], str(row[`Mobile ${i} Label`]) || 'Mobile')
     }
-
+    const emails = []; const e1 = str(row['Email 1']); if (e1) emails.push(e1)
+    const lead = {
+      id: idx, fullName: str(row['Full Name']) || '', firstName: str(row['First Name']) || '', lastName: str(row['Last Name']) || '',
+      secondName: str(row['Second Name']) || '', address: str(row['Property Address']) || '', city: str(row['Property City']) || '',
+      state: str(row['Property State']) || '', zip: str(row['Property Zip Code']) || '', propType: str(row['Property Type']) || '',
+      beds: num(row['Bedrooms']), baths: num(row['Bathrooms']), sqft: num(row['Square Footage']), yearBuilt: num(row['Year Built']),
+      county: str(row['County']), listPrice: num(row['List Price']), daysOnMarket: num(row['Days On Market']),
+      listingStatus: str(row['Listing Status']), statusChangeDate: fmtDate(row['Status Change Date']),
+      daysSinceExpired: daysAgo(row['Status Change Date']), listDate: fmtDate(row['List Date']), mlsId: str(row['MLS ID']),
+      listAgent: str(row['List Agent']), listOffice: str(row['List Office']), subdivision: str(row['Subdivision']),
+      taxOwnerName: str(row['Tax Owner Name']), phones: phones.slice(0, 5), emails, callablePhones: phones.length,
+      totalPhones: phones.length, hasEmail: emails.length > 0, callAttempts: num(row['Call Attempts']) || 0,
+      lastCallResult: str(row['Last Call Result']), source: str(row['Source']), leadId: str(row['Lead ID/Contact ID']),
+    }
     const { score, tier, notes } = scoreLead(lead)
-    const intel = buildIntel(lead)
-
-    return { ...lead, score, tier, notes, intel }
-  })
-
-  return leads.sort((a, b) => b.score - a.score)
+    return { ...lead, score, tier, scoreNotes: notes, intel: buildIntel(lead) }
+  }).sort((a, b) => b.score - a.score)
 }

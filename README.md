@@ -1,116 +1,76 @@
 # Lead Intel
 
-AI-powered lead scoring, ranking, and outreach tool for expired listings.
+AI-powered lead scoring platform for expired listings. Students upload their Mojo export, get every lead scored and ranked, then generate personalized emails and call scripts.
 
-## Setup (5 minutes)
+## Setup
 
-### Step 1: GitHub
+### 1. Supabase
+1. Create a project at supabase.com
+2. Go to SQL Editor, paste `supabase/schema.sql`, run it
+3. Go to Authentication > Settings > turn OFF "Enable Sign Up" (you control who gets an account)
+4. Copy your Project URL and anon key from Settings > API
 
-Create a new repo on GitHub. Push this project:
+### 2. Create Student Accounts
+In the Supabase SQL Editor, run this for each student (change the email and password):
 
-```bash
-cd lead-intel
-git init
-git add .
-git commit -m "initial"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/lead-intel.git
-git push -u origin main
+```sql
+select auth.create_user('{
+  "email": "student@example.com",
+  "password": "their-password",
+  "email_confirm": true
+}'::jsonb);
 ```
 
-### Step 2: Supabase
+### 3. GitHub + Netlify
+Push to GitHub, import in Netlify, add env vars:
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_ANON_KEY`
+- `ANTHROPIC_API_KEY`
 
-1. Go to https://supabase.com and create a new project
-2. Once the project is ready, go to SQL Editor
-3. Paste the contents of `supabase/schema.sql` and run it
-4. Go to Settings > API and copy:
-   - Project URL (looks like `https://xxxxx.supabase.co`)
-   - Anon public key (starts with `eyJ...`)
+Redeploy.
 
-### Step 3: Netlify
+## Admin SQL Helpers
 
-1. Go to https://app.netlify.com and click "Add new site" > "Import an existing project"
-2. Connect your GitHub repo
-3. Build settings (should auto-detect):
-   - Build command: `npm run build`
-   - Publish directory: `dist`
-4. Go to Site settings > Environment variables and add:
-   - `VITE_SUPABASE_URL` = your Supabase project URL
-   - `VITE_SUPABASE_ANON_KEY` = your Supabase anon key
-   - `ANTHROPIC_API_KEY` = your Anthropic API key (starts with `sk-ant-`)
-5. Trigger a redeploy after adding env vars
-
-That's it. The site is live.
-
-### Local dev (optional)
-
-```bash
-npm install
-cp .env.example .env
-# Edit .env with your Supabase credentials
-npm run dev
+View all students:
+```sql
+select u.email, count(distinct l.id) as lists, coalesce(sum(l.total_leads),0) as leads
+from auth.users u left join lists l on l.user_id = u.id
+group by u.id, u.email order by u.created_at desc;
 ```
 
-## How it works
+Clear a student's data (keep account):
+```sql
+delete from lists where user_id = (select id from auth.users where email = 'student@example.com');
+```
 
-### Upload
-- Property Export (.xlsx or .csv from PropStream)
-- Skip Traced Contacts (.csv with phone numbers and emails)
+Delete a student entirely:
+```sql
+delete from auth.users where email = 'student@example.com';
+```
 
-### Scoring (0 to 100)
-| Factor | Max Pts | Logic |
-|--------|---------|-------|
-| Equity | 25 | $500K+ = 25, $250K+ = 20, $100K+ = 15 |
-| Owner Occupied | 15 | Owner-occ = 15, Absentee = 8 |
-| Property Type | 20 | SFR = 20, TH = 18, MF = 17, Condo = 10 |
-| Contactability | 20 | 3+ callable = 20, 2 = 15, 1 = 10 |
-| Price Gap | 10 | Overpriced 15%+ = 10 |
-| Has Email | 5 | Follow-up channel |
-| Free & Clear | 5 | No mortgage |
+## What Students See
+1. Login with credentials you gave them
+2. My Lists page (previous uploads, upload new, delete old)
+3. Upload Mojo export (.xlsx or .csv)
+4. Dashboard with stats, tier breakdown, charts
+5. Call List sorted by score with search and tier filters
+6. Click any lead for full details + AI outreach (email + call script)
+7. Email Campaign button batch-generates emails for Instantly
+8. Mojo CSV export re-imports ranked leads back into their dialer
+9. Everything saves to their account and persists across sessions
 
-### Tiers
-- A Hot (76 to 100): Call first, multiple attempts
-- B High (61 to 75): Second wave
-- C Medium (41 to 60): Third wave
-- D Low (0 to 40): Email/text only
+## Persistence
+Every upload is saved to the student's account. When they log back in, their previous lists are there. They can load any previous list or delete ones they no longer need. Each student's data is completely private via Row Level Security.
 
-### Exports
-- **Ranked XLSX**: Full scored sheet with pre-call intel
-- **Mojo CSV**: DNC-filtered, sorted by score, Mojo Dialer format
-- **Email Campaign CSV**: AI-generated personalized emails for every lead with an email address, formatted for Instantly import
-
-### Per-lead AI generation
-Click any lead and generate:
-- Personalized outreach email (references their property, equity, situation)
-- Follow-up text (for after missed call/voicemail)
-- Cold call opener script (with objection handlers)
-
-### Batch email campaign
-Hit "Generate Email Campaign" in the nav. It runs Claude against every lead with an email and exports a CSV with columns: email, first_name, last_name, address, city, state, tier, score, custom_email_body. Upload into Instantly as a campaign.
+## Edge Cases Handled
+- Wrong file format (not Mojo export) shows clear error
+- Empty files show clear error
+- Large files chunk into 200-row batches for Supabase
+- API rate limits retry 2x with backoff
+- Batch email with 0 email leads shows message
+- No phone numbers still scores (just lower)
+- Lost connection during save keeps leads in memory
+- Multiple students uploading simultaneously (each isolated by user_id)
 
 ## Stack
-- React 18, Vite 5
-- Supabase (Postgres, optional persistence)
-- SheetJS (xlsx/csv parsing and export)
-- PapaParse (csv parsing)
-- Recharts (charts)
-- Lucide React (icons)
-- Claude API (AI generation, runs client-side from the artifact)
-- Netlify (hosting)
-
-## File structure
-```
-src/
-  App.jsx           Main UI
-  main.jsx          Entry point
-  lib/
-    ai.js           Claude API calls (single + batch)
-    exporter.js     XLSX, Mojo CSV, Email Campaign CSV exports
-    parser.js       File reading, property + contact merging
-    scoring.js      Lead scoring engine
-    supabase.js     Database client
-  styles/
-    index.css       All styles
-supabase/
-  schema.sql        Database schema (run in Supabase SQL editor)
-```
+React 18, Vite 5, Supabase (Postgres + Auth + RLS), Netlify Functions, Claude Sonnet, SheetJS, PapaParse, Recharts, Lucide React

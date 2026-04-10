@@ -1,168 +1,94 @@
-// Claude API interactions for lead outreach generation
-// Calls /api/claude (Netlify Function) so the API key stays server-side
+const RETRIES = 2, DELAY = 1500, BATCH = 3, TOK = { email: 800, script: 1200 }
 
-const MAX_RETRIES = 2
-const RETRY_BASE_MS = 1500
-const BATCH_CONCURRENCY = 3
-
-function buildContext(lead) {
-  const name = lead.ownerFirst || lead.contactNames?.split('|')[0]?.trim()?.split(' ')[0] || 'Homeowner'
-  const full = lead.contactNames?.split('|')[0]?.trim() || name
-  const prop = `${lead.propType || 'property'} at ${lead.address}, ${lead.city}`
-  const eq = lead.equity
-    ? (lead.equity < 0 ? 'negative (underwater)' : `$${lead.equity.toLocaleString()}`)
-    : 'unknown'
-  const listed = lead.mlsAmount
-    ? (lead.mlsAmount > 1000 ? `$${lead.mlsAmount.toLocaleString()}` : `$${lead.mlsAmount}/mo`)
-    : 'unknown'
-  const expired = lead.mlsDate || 'recently'
-  const occ = lead.ownerOcc === 'Yes' ? 'owner-occupied' : 'absentee owner'
-  const free = lead.ltv === 0 ? 'Property is FREE AND CLEAR.' : ''
-  return { name, full, prop, eq, listed, expired, occ, free }
+function ctx(l) {
+  const name = l.firstName || l.fullName?.split(' ')[0] || 'Homeowner'
+  const full = l.fullName || name
+  return { name, full, prop: `${l.address}, ${l.city}`, type: l.propType || 'property',
+    listed: l.listPrice ? `$${l.listPrice.toLocaleString()}` : 'an unlisted price',
+    dom: l.daysOnMarket ? `${l.daysOnMarket} days` : 'some time',
+    expired: l.statusChangeDate || 'recently',
+    prev: l.listAgent ? `Previously listed with ${l.listAgent}${l.listOffice ? ` at ${l.listOffice}` : ''}.` : '' }
 }
 
-const TOKEN_LIMITS = { email: 800, script: 1200 }
+const P = {
+  email: c => `Write a short outreach email (4 to 5 sentences) from a real estate agent to a homeowner whose listing just expired.
 
-const PROMPTS = {
-  email: (c) => `Write a short outreach email (4 to 5 sentences) from a real estate agent to an expired listing homeowner.
+Owner name: ${c.full}
+Property: ${c.type} at ${c.prop}
+Was listed at: ${c.listed}
+Sat on the market for: ${c.dom}
+Listing expired: ${c.expired}
+${c.prev}
 
-Owner: ${c.full}
-Property: ${c.prop}
-Listed at: ${c.listed}
-Equity: ${c.eq}
-Status: ${c.occ}
-Expired: ${c.expired}
-${c.free}
+Rules:
+- Mention their property address and how long it sat on the market
+- Be empathetic about the experience but direct about why you are reaching out
+- Do not use filler phrases like "I hope this finds you well"
+- End with a simple ask to have a brief phone conversation
+- No emojis, no exclamation marks, no dashes of any kind
+- Just the email body, no subject line or sign-off name
+- Keep it at a 6th grade reading level`,
 
-Rules: Reference their specific property and situation. Empathetic but direct. No filler like "I hope this finds you well." Hit the pain point (listing expired, they still want to sell, bad experience). Not pushy. End with a CTA to have a quick conversation. No emojis, no exclamation marks, no dashes. Just the email body, no subject line. 6th grade reading level.`,
+  script: c => `Write a cold call opener script for a real estate agent calling a homeowner whose listing just expired.
 
-  script: (c) => `Write a cold call opener script for a real estate agent calling an expired listing.
+Owner name: ${c.full}
+Property: ${c.type} at ${c.prop}
+Was listed at: ${c.listed}
+Days on market: ${c.dom}
+Listing expired: ${c.expired}
+${c.prev}
 
-Owner: ${c.full}
-Property: ${c.prop}
-Listed at: ${c.listed}
-Equity: ${c.eq}
-Status: ${c.occ}
-Expired: ${c.expired}
-${c.free}
-
-Format it exactly like this:
-
-OPENER: (2 sentences. Use their name. Reference the property. Get to the point.)
+Format:
+OPENER: (2 sentences. Use their first name. Reference the property address.)
 BRIDGE: (1 sentence. Why you are calling.)
-HOOK QUESTION: (1 open ended question to get them talking about their experience.)
-IF "I already have an agent": (1 to 2 sentence response)
-IF "I'm not interested": (1 to 2 sentence response)
-CLOSE: (1 to 2 sentences. Book the meeting, not sell the listing.)
+QUESTION: (1 open-ended question to get them talking about what went wrong.)
+IF "I already have an agent": (1 to 2 sentence response.)
+IF "I'm not interested": (1 to 2 sentence response.)
+CLOSE: (1 to 2 sentences. Book a 15-minute meeting. Do not try to sell the listing on the phone.)
 
-Rules: Total under 150 words. Conversational. Not robotic. Never say "how are you doing today." No emojis, no dashes. No filler like "I completely understand." 6th grade reading level.`,
+Rules:
+- Under 150 words total
+- Conversational and natural
+- Never open with "how are you doing" or "how are you today"
+- No emojis, no dashes of any kind
+- No filler phrases like "I completely understand" or "that makes total sense"
+- 6th grade reading level`
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-async function callClaude(prompt, type = 'email') {
-  const maxTokens = TOKEN_LIMITS[type] || 800
-  let lastErr = null
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    if (attempt > 0) {
-      await sleep(RETRY_BASE_MS * Math.pow(2, attempt - 1))
-    }
-
+async function call(prompt, type = 'email') {
+  let err
+  for (let i = 0; i <= RETRIES; i++) {
+    if (i) await sleep(DELAY * 2 ** (i - 1))
     try {
-      const res = await fetch('/api/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: maxTokens,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      })
-
-      // Retry on 429 (rate limit) and 529 (overloaded)
-      if (res.status === 429 || res.status === 529) {
-        lastErr = new Error(`API returned ${res.status}`)
-        continue
-      }
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error?.message || err.error || `API returned ${res.status}`)
-      }
-
-      const data = await res.json()
-
-      // Check for API-level errors in response body
-      if (data.type === 'error') {
-        const msg = data.error?.message || 'Unknown API error'
-        // Retry on overload errors
-        if (msg.includes('overloaded')) { lastErr = new Error(msg); continue }
-        throw new Error(msg)
-      }
-
-      return data.content?.map(b => b.text || '').join('\n') || 'Error: empty response'
-    } catch (e) {
-      lastErr = e
-      // Only retry on network errors, not on validation errors
-      if (e.name === 'TypeError' && e.message.includes('fetch')) continue
-      if (attempt === MAX_RETRIES) throw e
-    }
+      const r = await fetch('/api/claude', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: TOK[type] || 800, messages: [{ role: 'user', content: prompt }] }) })
+      if (r.status === 429 || r.status === 529) { err = new Error(`Rate limited`); continue }
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error?.message || e.error || `Error ${r.status}`) }
+      const d = await r.json()
+      if (d.type === 'error') { const m = d.error?.message || 'API error'; if (m.includes('overloaded')) { err = new Error(m); continue }; throw new Error(m) }
+      return d.content?.map(b => b.text || '').join('\n') || 'Empty response.'
+    } catch (e) { err = e; if (i === RETRIES) throw e }
   }
-
-  throw lastErr || new Error('Max retries exceeded')
+  throw err
 }
 
-export async function generateForLead(lead, type) {
-  const ctx = buildContext(lead)
-  const prompt = PROMPTS[type](ctx)
-  return callClaude(prompt, type)
-}
+export async function generateForLead(lead, type) { return call(P[type](ctx(lead)), type) }
 
-// Batch generate emails with parallel concurrency
 export async function batchGenerateEmails(leads, onProgress, cancelRef) {
-  const emailLeads = leads.filter(l => l.hasEmail && l.emails?.length > 0)
-  if (emailLeads.length === 0) return []
-
-  const results = new Array(emailLeads.length).fill(null)
-  let completedCount = 0
-
-  // Process in chunks of BATCH_CONCURRENCY
-  for (let i = 0; i < emailLeads.length; i += BATCH_CONCURRENCY) {
+  const el = leads.filter(l => l.hasEmail && l.emails?.length > 0)
+  if (!el.length) return []
+  const res = Array(el.length).fill(null)
+  for (let i = 0; i < el.length; i += BATCH) {
     if (cancelRef?.current) break
-
-    const chunk = emailLeads.slice(i, i + BATCH_CONCURRENCY)
-    const promises = chunk.map(async (l, chunkIdx) => {
-      const idx = i + chunkIdx
+    await Promise.all(el.slice(i, i + BATCH).map(async (l, ci) => {
       if (cancelRef?.current) return
-
-      const ctx = buildContext(l)
-      const prompt = PROMPTS.email(ctx)
-      const firstName = ctx.full.split(' ')[0] || ''
-      const lastName = ctx.full.split(' ').slice(1).join(' ') || ''
-      const base = {
-        email: l.emails[0],
-        first_name: firstName,
-        last_name: lastName,
-        address: l.address,
-        city: l.city,
-        state: l.state || 'FL',
-        tier: l.tier,
-        score: l.score,
-      }
-
-      try {
-        const body = await callClaude(prompt, 'email')
-        results[idx] = { ...base, custom_email_body: body }
-      } catch (e) {
-        results[idx] = { ...base, custom_email_body: `[Failed: ${e.message}]` }
-      }
-    })
-
-    await Promise.all(promises)
-    completedCount = Math.min(i + BATCH_CONCURRENCY, emailLeads.length)
-    onProgress?.(completedCount, emailLeads.length)
+      const c = ctx(l), base = { email: l.emails[0], first_name: l.firstName || c.name, last_name: l.lastName || '', address: l.address, city: l.city, state: l.state, tier: l.tier, score: l.score }
+      try { res[i + ci] = { ...base, custom_email_body: await call(P.email(c), 'email') } }
+      catch { res[i + ci] = { ...base, custom_email_body: '[Generation failed]' } }
+    }))
+    onProgress?.(Math.min(i + BATCH, el.length), el.length)
   }
-
-  return results.filter(Boolean)
+  return res.filter(Boolean)
 }
